@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+.git/
+telegram-bot-muse-1.2-plan.md
+index.html
