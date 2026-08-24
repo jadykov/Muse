@@ -209,24 +209,44 @@ async def chat_with_search(
     user_text: str,
     system_prompt: str | None = None,
 ) -> str:
+    # web_search через OpenRouter на muse-spark зависает (stream body не закрывается,
+    # проверено в логах: 12s timeout). Не тратим токены — сразу обычный chat.
+    # Если модель поддерживает web_search (другая), можно вернуть extra_body путь.
+    if "muse-spark" in settings.muse_model:
+        prompt = (system_prompt or SYSTEM_PROMPT_FALLBACK) + (
+            "\nПользователь просит свежие новости/поиск. Ответь исходя из знаний, "
+            "укажи дату (МСК) и честно предупреди что без live-поиска данные могут быть неполными. "
+            "Предложи уточнить в источниках."
+        )
+        return await chat_completion(chat_id, user_text, system_prompt=prompt)
+
+    import asyncio
+
     client = get_client()
     prompt = system_prompt or SYSTEM_PROMPT_FALLBACK
     messages = _messages_for_chat(chat_id, user_text, system_prompt=prompt)
     logger.info("muse search chat_id=%s query=%r", chat_id, user_text[:120])
-    # OpenRouter supports web_search via extra_body / tools depending on provider.
-    # Use tools web_search if available; otherwise plain chat.
     tools = [{"type": "web_search"}]
     try:
-        resp = await client.chat.completions.create(
-            model=settings.muse_model,
-            messages=messages,  # type: ignore[arg-type]
-            max_tokens=1024,
-            extra_body={"tools": tools},  # type: ignore[arg-type]
+        resp = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=settings.muse_model,
+                messages=messages,  # type: ignore[arg-type]
+                max_tokens=1024,
+                extra_body={"tools": tools},  # type: ignore[arg-type]
+            ),
+            timeout=12,
         )
-        return (resp.choices[0].message.content or "").strip()
+        text = (resp.choices[0].message.content or "").strip()
+        if text:
+            return text
+        logger.warning("web_search empty result, fallback plain")
+    except asyncio.TimeoutError:
+        logger.warning("web_search timeout 12s, fallback plain")
     except Exception as e:
         logger.warning("web_search not supported, fallback plain: %s", e)
-        return await chat_completion(chat_id, user_text, system_prompt=system_prompt)
+    fallback_prompt = prompt + "\nПользователь просит свежие новости/поиск. Ответь максимально актуально, укажи что данные на сейчас и предложи уточнить."
+    return await chat_completion(chat_id, user_text, system_prompt=fallback_prompt)
 
 
 async def fetch_bytes(url: str) -> tuple[bytes, str]:

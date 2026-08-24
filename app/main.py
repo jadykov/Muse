@@ -15,6 +15,7 @@ from app.logging_config import setup_logging
 from app import muse
 from app.history import history
 from app import tools as app_tools
+from app.format import safe_reply_text, safe_edit_text
 
 logger = logging.getLogger(__name__)
 
@@ -51,30 +52,32 @@ def needs_search(text: str) -> bool:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
-    await update.message.reply_text(
-        "Привет! Я Muse 1.2 бот для группы (5 чел).\n"
+    await safe_reply_text(
+        update.message,
+        "Привет! Я *Muse 1.2* бот для группы (5 чел).\n"
         "Что умею:\n"
         "• Текст — просто пиши (стриминг)\n"
         "• Фото/документ — опишу и сделаю OCR\n"
         "• Голосовые — расшифрую (audio input нативно)\n"
-        "• Поиск — напиши «найди ...» или /search\n"
+        "• Поиск — напиши `найди ...` или /search\n"
         "• Инструменты — спроси время, /calc 2+2, /json запрос\n"
-        "Команды: /help /clear /search /calc /json"
+        "Команды: /help /clear /search /calc /json",
     )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
-    await update.message.reply_text(
+    await safe_reply_text(
+        update.message,
         "/start — приветствие\n"
         "/help — эта справка\n"
         "/clear — очистить историю чата\n"
-        "/search <запрос> — живой поиск в интернете\n"
-        "/calc <выражение> — калькулятор\n"
-        "/json <запрос> — structured output (JSON)\n\n"
+        "/search `<запрос>` — живой поиск в интернете\n"
+        "/calc `<выражение>` — калькулятор\n"
+        "/json `<запрос>` — structured output (JSON)\n\n"
         "Просто отправь текст/фото/голосовое — отвечу через Muse 1.2.\n"
-        "Триггеры времени: «который час», «время», «дата» -> tool calling."
+        "Триггеры времени: `который час`, `время`, `дата` -> tool calling.",
     )
 
 
@@ -82,7 +85,7 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
     history.clear(update.effective_chat.id)
-    await update.message.reply_text("История чата очищена.")
+    await safe_reply_text(update.message, "История чата очищена.")
 
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -92,18 +95,24 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not query and update.message.reply_to_message and update.message.reply_to_message.text:
         query = update.message.reply_to_message.text
     if not query:
-        await update.message.reply_text("Использование: /search <запрос>")
+        await safe_reply_text(update.message, "Использование: /search `<запрос>`")
         return
     chat_id = update.effective_chat.id
     history.add(chat_id, "user", query)
-    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    status = await update.message.reply_text("Ищу…")
     try:
         answer = await muse.chat_with_search(chat_id, query)
     except Exception as e:
         logger.exception("search failed")
-        answer = f"Ошибка поиска: {e}"
+        try:
+            answer = await muse.chat_completion(chat_id, query)
+        except Exception as e2:
+            answer = f"Ошибка поиска: {e2}"
+    try:
+        await safe_edit_text(status, answer or "—")
+    except Exception:
+        await safe_reply_text(update.message, answer or "—")
     history.add(chat_id, "assistant", answer)
-    await update.message.reply_text(answer[:4000] or "—")
 
 
 async def cmd_calc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -111,10 +120,10 @@ async def cmd_calc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     expr = " ".join(context.args) if context.args else ""
     if not expr:
-        await update.message.reply_text("Использование: /calc <выражение>  например: /calc (12+5)*3")
+        await safe_reply_text(update.message, "Использование: /calc `<выражение>`  например: /calc `(12+5)*3`")
         return
     result = app_tools.safe_calc(expr)
-    await update.message.reply_text(f"{expr} = {result}")
+    await safe_reply_text(update.message, f"`{expr}` = `{result}`")
 
 
 async def cmd_json(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -122,7 +131,7 @@ async def cmd_json(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     text = " ".join(context.args) if context.args else ""
     if not text:
-        await update.message.reply_text("Использование: /json <запрос> — вернет structured JSON")
+        await safe_reply_text(update.message, "Использование: /json `<запрос>` — вернет structured JSON")
         return
     chat_id = update.effective_chat.id
     history.add(chat_id, "user", text)
@@ -131,11 +140,11 @@ async def cmd_json(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         data = await muse.chat_structured(chat_id, text, schema={"type": "object"})
         import json as _json
         out = _json.dumps(data, ensure_ascii=False, indent=2)
-        await update.message.reply_text(f"```json\n{out[:3800]}\n```", parse_mode="Markdown")
+        await safe_reply_text(update.message, f"```json\n{out[:3800]}\n```")
         history.add(chat_id, "assistant", out)
     except Exception as e:
         logger.exception("json failed")
-        await update.message.reply_text(f"Ошибка: {e}"[:4000])
+        await safe_reply_text(update.message, f"Ошибка: {e}"[:4000])
 
 
 # --- Streaming helper for text ---
@@ -149,7 +158,7 @@ async def reply_streaming(update: Update, chat_id: int, user_text: str) -> None:
         try:
             text = await muse.chat_completion(chat_id, user_text)
             history.add(chat_id, "assistant", text)
-            await update.message.reply_text(text[:4000] or "—")
+            await safe_reply_text(update.message, text or "—")
             return
         except Exception:
             logger.exception("tool chat failed, fallback to stream")
@@ -165,6 +174,7 @@ async def reply_streaming(update: Update, chat_id: int, user_text: str) -> None:
             now = time.time()
             if now - last_edit > 0.9 and len(buffer) > 10:
                 try:
+                    # stream without markdown — partial markdown always breaks parsing
                     await msg.edit_text(buffer[:4000])
                     last_edit = now
                 except Exception:
@@ -172,19 +182,19 @@ async def reply_streaming(update: Update, chat_id: int, user_text: str) -> None:
         final = buffer.strip() or "—"
         history.add(chat_id, "assistant", final)
         try:
-            await msg.edit_text(final[:4000])
+            await safe_edit_text(msg, final[:4000])
         except Exception:
             if final != buffer.strip():
-                await update.message.reply_text(final[:4000])
+                await safe_reply_text(update.message, final[:4000])
     except Exception as e:
         logger.exception("stream failed, fallback")
         try:
             text = await muse.chat_completion(chat_id, user_text)
             history.add(chat_id, "assistant", text)
-            await msg.edit_text(text[:4000] or "—")
+            await safe_edit_text(msg, text or "—")
         except Exception as e2:
             logger.exception("fallback also failed")
-            await msg.edit_text(f"Ошибка: {e2}"[:4000])
+            await safe_edit_text(msg, f"Ошибка: {e2}"[:4000])
 
 
 async def context_bot_send_typing(update: Update, chat_id: int):
@@ -208,16 +218,33 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     history.add(chat_id, "user", text, name=user_name)
 
-    # Live search trigger
+    # Live search trigger — with status msg so не молчит пока ищет
     if needs_search(text):
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        status = await update.message.reply_text("Ищу новости…")
         try:
             answer = await muse.chat_with_search(chat_id, text)
+            # сначала отправляем пользователю, потом пишем в историю — чтобы при падении edit не было "призрачного" сообщения в истории
+            try:
+                await safe_edit_text(status, answer or "—")
+            except Exception:
+                logger.exception("safe_edit news failed, try plain reply")
+                await safe_reply_text(update.message, answer or "—")
             history.add(chat_id, "assistant", answer)
-            await update.message.reply_text(answer[:4000] or "—")
             return
-        except Exception:
-            logger.exception("search trigger fallback to chat")
+        except Exception as e:
+            logger.exception("search trigger failed: %s", e)
+            try:
+                answer = await muse.chat_completion(chat_id, text)
+                try:
+                    await safe_edit_text(status, answer or f"Не смог найти новости: {e}"[:4000])
+                except Exception:
+                    await safe_reply_text(update.message, answer or "—")
+                history.add(chat_id, "assistant", answer)
+                return
+            except Exception as e2:
+                logger.exception("search fallback also failed")
+                await safe_edit_text(status, f"Ошибка поиска: {e2}"[:4000])
+                return
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     await reply_streaming(update, chat_id, text)
@@ -244,10 +271,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             mime = "image/jpeg"
         answer = await muse.chat_with_image(chat_id, data, mime, caption=caption)
         history.add(chat_id, "assistant", answer)
-        await status.edit_text(answer[:4000] or "—")
+        await safe_edit_text(status, answer or "—")
     except Exception as e:
         logger.exception("photo handle failed")
-        await status.edit_text(f"Не смог обработать фото: {e}"[:4000])
+        await safe_edit_text(status, f"Не смог обработать фото: {e}"[:4000])
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -278,10 +305,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 text_preview = f"<бинарный файл {len(data)} байт>"
             answer = await muse.chat_completion(chat_id, f"Пользователь прислал документ {doc.file_name} ({mime}). Caption: {caption}\nСодержимое (превью):\n{text_preview[:3000]}")
         history.add(chat_id, "assistant", answer)
-        await status.edit_text(answer[:4000] or "—")
+        await safe_edit_text(status, answer or "—")
     except Exception as e:
         logger.exception("document handle failed")
-        await status.edit_text(f"Не смог обработать документ: {e}"[:4000])
+        await safe_edit_text(status, f"Не смог обработать документ: {e}"[:4000])
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -307,10 +334,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             mime = "audio/mpeg"
         answer = await muse.chat_with_audio(chat_id, data, mime, caption=caption)
         history.add(chat_id, "assistant", answer)
-        await status.edit_text(answer[:4000] or "—")
+        await safe_edit_text(status, answer or "—")
     except Exception as e:
         logger.exception("voice handle failed")
-        await status.edit_text(f"Не смог обработать аудио: {e}"[:4000])
+        await safe_edit_text(status, f"Не смог обработать аудио: {e}"[:4000])
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
